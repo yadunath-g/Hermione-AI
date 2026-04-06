@@ -5,7 +5,7 @@ import datetime
 from groq import Groq
 
 # --- CONFIGURATION ---
-API_KEY = "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" 
+API_KEY = "" 
 MEMORY_FILE = "hermione_memory.json"
 
 try:
