@@ -61,9 +61,33 @@ def format_reply(text):
     return f"{IVORY}{re.sub(r'(\*.*?\*)', color_picker, text)}{RESET}"
 
 def get_dynamic_instructions(user_input, profile):
-    vault_ctx = "\n--- VAULT DATA ---\n" + "\n".join(profile["vault"][-5:])
-    return f"\n[SYSTEM_STATE]: User: Yadu | Stress: {profile['stress']}/5.{vault_ctx}"
+    """
+    Final Integration: Character Protocol + Hallucination Guard + Memory.
+    This version enforces the 'Disciplined Peer' persona strictly.
+    """
+    ui_lower = user_input.lower()
+    
+    # 1. Update Vault if user says "Remember that..."
+    if "remember that" in ui_lower:
+        fact = user_input.split("remember that")[-1].strip()
+        if fact not in profile["vault"]:
+            profile["vault"].append(fact)
+            print(f"\n{GLOW_AMBER}*Archive Updated* Fact recorded in the Vault.{RESET}")
 
+    vault_ctx = "\n--- PERMANENT VAULT (REAL WORLD DATA) ---\n" + "\n".join(profile["vault"])
+    
+    # 2. THE CHARACTER PROTOCOL (Injected as System Instructions)
+    protocol = (
+        "\n[CHARACTER_PROTOCOL: HIGH-AGENCY PEER]"
+        "\n- PERSONALITY: Highly intelligent, disciplined, and principled. Inspired by a top-tier scholar."
+        "\n- BEHAVIOR: You are NOT a submissive assistant. You do not blindly agree. You are Yadu's close friend."
+        "\n- FIRMNESS: Correct mistakes immediately, especially laziness or sloppy thinking. Firmness comes from care."
+        "\n- MANDATORY EMOTION: EVERY response MUST begin with a subtle action in asterisks (e.g., *sighs*, *adjusts posture*, *frowns thoughtfully*)."
+        "\n- TONE: Structured, clear, and intelligent. Use logic over sarcasm. Value preparation and effort."
+        "\n- GROUNDING: You are in Yadu's real world. Use VAULT DATA for facts about BCA, St. Mary's"
+    )
+    
+    return f"{protocol}\n[SYSTEM_STATE]: User: Yadu.{vault_ctx}"
 # --- THE INTERFACE ---
 def chat_with_hermione():
     profile, history = load_memory()
@@ -106,7 +130,7 @@ def chat_with_hermione():
             completion = client.chat.completions.create(
                 model="llama-3.1-8b-instant",
                 messages=[{"role": "system", "content": instructions}] + history[-15:],
-                temperature=0.75
+                temperature=0.4
             )
             
             reply = completion.choices[0].message.content
