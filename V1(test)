@@ -1,0 +1,691 @@
+import os
+import json
+import re
+import datetime
+import threading
+import time
+import sys
+import subprocess
+import webbrowser
+import platform
+
+# --- CROSS-PLATFORM AUTOMATION DEPENDENCIES ---
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = True
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pyautogui"])
+    import pyautogui
+    pyautogui.FAILSAFE = True
+
+# --- RESOURCE MONITORING ---
+try:
+    import psutil
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "psutil"])
+    import psutil
+
+# --- CONFIGURATION ---
+ENV_FILE = ".env"
+API_KEY = os.environ.get("GROQ_API_KEY")
+
+if not API_KEY and os.path.exists(ENV_FILE):
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("GROQ_API_KEY="):
+                    API_KEY = line.strip().split("=", 1)[1].strip("'\" ")
+                    os.environ["GROQ_API_KEY"] = API_KEY
+    except Exception:
+        pass
+
+if not API_KEY:
+    print("\033[31m[CRITICAL]: GROQ_API_KEY environment variable not set.\033[0m")
+    sys.exit(1)
+
+MEMORY_FILE = "hermione_memory.json"
+ACTIVE_MODEL = "openai/gpt-oss-120b"
+
+try:
+    from groq import Groq
+    client = Groq(api_key=API_KEY)
+except Exception as e:
+    print(f"CRITICAL_ERROR: {e}")
+    sys.exit(1)
+
+# Thread synchronization lock for standard output
+stdout_lock = threading.Lock()
+
+# ═══════════════════════════════════════════════════════
+#  ANSI COLOR ENGINE
+# ═══════════════════════════════════════════════════════
+if platform.system() == "Windows":
+    os.system('')
+
+def hex_to_ansi(hex_code):
+    h = hex_code.lstrip('#')
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"\033[38;2;{r};{g};{b}m"
+
+def ansi256(n):
+    return f"\033[38;5;{n}m"
+
+R   = "\033[0m"
+B   = "\033[1m"
+DIM = "\033[2m"
+
+GLOW_AMBER  = hex_to_ansi("#E6C07B")
+IVORY       = hex_to_ansi("#F5E6C8")
+WARM_WHITE  = hex_to_ansi("#FFF3D1")
+AGENT_COLOR = GLOW_AMBER
+
+C_GREEN  = ansi256(46)
+C_CYAN   = ansi256(51)
+C_AMBER  = ansi256(208)
+C_YELLOW = ansi256(226)
+C_RED    = ansi256(196)
+C_TEAL   = ansi256(87)
+C_BLUE   = ansi256(45)
+C_LIME   = ansi256(154)
+C_WHITE  = ansi256(255)
+C_DIM    = ansi256(240)
+
+RED        = hex_to_ansi("#FF4444")
+YELLOW     = hex_to_ansi("#FFE566")
+BLUE       = hex_to_ansi("#4A9EFF")
+PURPLE_HEX = hex_to_ansi("#A020F0")
+GREEN      = hex_to_ansi("#00FF08")
+ORANGE     = hex_to_ansi("#FFA500")
+NEUTRAL    = hex_to_ansi("#00FFFF")
+
+EMOTION_MAP = {
+    ("beam", "laugh", "happy", "smile", "nods", "warmly", "warm", "leans"): YELLOW,
+    ("sigh", "sad", "frown", "down", "disappointed", "gently", "gentle"): BLUE,
+    ("slams", "glares", "snaps", "sharp", "narrows", "stern"): RED,
+    ("recoils", "sneers", "winces", "dreadful", "disgust"): GREEN,
+    ("pales", "worried", "fear", "anxious", "bites"): ORANGE,
+    ("gasps", "widens", "surprised", "merlin", "glancing", "waves"): PURPLE_HEX,
+    ("looks", "studies", "tilts", "examines", "flicks", "peers", "whispers", "softly"): NEUTRAL,
+}
+
+def emotion_color(act_lower):
+    for keywords, color in EMOTION_MAP.items():
+        if any(k in act_lower for k in keywords):
+            return color
+    return NEUTRAL
+
+def format_reply(text):
+    clean = re.sub(r'(?:\\033|\033|\\u001b|\[)?\d+;\d+;\d+(?:\d+)?m?', '', text)
+    clean = re.sub(r'\[\d+;\d+;\d+m', '', clean)
+    clean = re.sub(r'\b\d+;\d+;\d+m\b', '', clean)
+    clean = re.sub(r'```[\s\S]*?```', '', clean).strip()
+
+    # Step 1: Render bold text (**bold**)
+    clean = re.sub(r'\*\*(.+?)\*\*', lambda m: f"{B}{m.group(1)}{R}{IVORY}", clean)
+
+    # Step 2: Render action cues (*action*) without interfering with bold formatting
+    def color_action(match):
+        act = match.group(0).lower()
+        c = emotion_color(act)
+        return f"{c}{B}{match.group(0)}{R}{IVORY}"
+
+    return f"{IVORY}{re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', color_action, clean)}{R}"
+
+def type_out(text, delay=0.01):
+    with stdout_lock:
+        ansi_pattern = re.compile(r'(\033\[[0-9;]*m)')
+        tokens = ansi_pattern.split(text)
+        for token in tokens:
+            if ansi_pattern.match(token):
+                sys.stdout.write(token)
+                sys.stdout.flush()
+            else:
+                for char in token:
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
+                    time.sleep(delay)
+        print()
+
+def thinking_indicator(stop_event):
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    while not stop_event.is_set():
+        with stdout_lock:
+            sys.stdout.write(f"\r  {C_DIM}{frames[i % len(frames)]} Hermione is thinking...{R}   ")
+            sys.stdout.flush()
+        i += 1
+        time.sleep(0.08)
+    with stdout_lock:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+# ═══════════════════════════════════════════════════════
+#  BOX DRAWING HELPERS
+# ═══════════════════════════════════════════════════════
+W = 76
+
+def box_top(title="", color=C_CYAN, w=W):
+    if title:
+        pad = w - len(title) - 4
+        return f"{color}╔══[ {B}{title}{R}{color} ]{'═'*pad}╗{R}"
+    return f"{color}╔{'═'*w}╗{R}"
+
+def box_mid(label="", color=C_CYAN, w=W):
+    if label:
+        pad = w - len(label) - 4
+        return f"{color}╠══[ {C_DIM}{label}{color} ]{'─'*pad}╣{R}"
+    return f"{color}╠{'═'*w}╣{R}"
+
+def box_row(content, color=C_CYAN, w=W):
+    visible = re.sub(r'\033\[[0-9;]*m', '', content)
+    pad = max(0, w - len(visible) - 1)
+    return f"{color}║{R} {content}{' '*pad}{color}║{R}"
+
+def box_bot(color=C_CYAN, w=W):
+    return f"{color}╚{'═'*w}╝{R}"
+
+def sub_top(title="", color=C_DIM, w=W-2):
+    if title:
+        pad = w - len(title) - 4
+        return f"  {color}┌─[ {C_WHITE}{title}{color} ]{'─'*pad}┐{R}"
+    return f"  {color}┌{'─'*w}┐{R}"
+
+def sub_row(content, color=C_DIM, w=W-2):
+    visible = re.sub(r'\033\[[0-9;]*m', '', content)
+    pad = max(0, w - len(visible) - 1)
+    return f"  {color}│{R} {content}{' '*pad}{color}│{R}"
+
+def sub_bot(color=C_DIM, w=W-2):
+    return f"  {color}└{'─'*w}┘{R}"
+
+def make_bar(pct, length=24, fill_color=C_GREEN, empty_color=C_DIM):
+    filled = round(pct / 100 * length)
+    return f"{fill_color}{'█'*filled}{C_DIM}{'░'*(length-filled)}{R}"
+
+def pct_color(pct):
+    if pct >= 80: return C_RED
+    if pct >= 55: return C_AMBER
+    return C_GREEN
+
+# ═══════════════════════════════════════════════════════
+#  WORKSPACE AUTOMATION ENGINE
+# ═══════════════════════════════════════════════════════
+def execute_system_task(action_payload):
+    normalized = action_payload.replace("\\n", "\n")
+    log_lines = []
+    def log(line): log_lines.append(line)
+
+    macro_matches = re.finditer(r'\b([A-Z_0-9]+)\((.*?)\)', normalized, re.DOTALL)
+    commands_found = list(macro_matches)
+
+    if not commands_found:
+        return f"{C_DIM}No valid workspace automation execution signature matched.{R}"
+
+    for match in commands_found:
+        func_name = match.group(1).upper()
+        raw_args_str = match.group(2).strip()
+
+        if "YT" in func_name or "YOUTUBE" in func_name:
+            func_name = "PLAY_YT"
+        elif "SEARCH" in func_name or "FIND" in func_name or "GOOGLE" in func_name:
+            func_name = "WEB_SEARCH"
+        elif "DIR" in func_name or "FOLDER" in func_name:
+            func_name = "CREATE_DIR"
+        elif "DOC" in func_name or "TYPE" in func_name:
+            func_name = "AUTOMATE_DOCS"
+        elif "FILE" in func_name or "WRITE" in func_name:
+            func_name = "WRITE_FILE"
+        elif "APP" in func_name or "OPEN" in func_name or "LAUNCH" in func_name:
+            func_name = "OPEN_APP"
+        elif "HOT" in func_name or "KEY" in func_name or "SHORTCUT" in func_name:
+            func_name = "HOTKEY"
+        elif "SHOT" in func_name or "CAPTURE" in func_name or "SCREEN" in func_name:
+            func_name = "SCREENSHOT"
+
+        args = [arg.strip(" '\"") for arg in re.findall(r'\'[^\']*\'|"[^"]*"|[^,]+', raw_args_str) if arg.strip()]
+
+        try:
+            if func_name == "PLAY_YT" and args:
+                query = args[0]
+                webbrowser.open(f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}")
+                log(f"{C_GREEN}●{R} {C_CYAN}Media Stream Dispatched{R} {C_DIM}→{R} {C_YELLOW}{B}\"{query}\"{R}")
+
+            elif func_name == "WEB_SEARCH" and args:
+                query = args[0]
+                webbrowser.open(f"https://duckduckgo.com/?q={query.replace(' ', '+')}")
+                log(f"{C_GREEN}●{R} {C_CYAN}Web Search Dispatched{R} {C_DIM}→{R} {C_YELLOW}{B}\"{query}\"{R}")
+
+            elif func_name == "CREATE_DIR" and args:
+                safe = re.sub(r'[^\w\-_/.]', '', args[0])
+                os.makedirs(safe, exist_ok=True)
+                log(f"{C_GREEN}●{R} {C_LIME}Directory Ready{R} {C_DIM}→{R} {C_WHITE}./{safe}{R}")
+
+            elif func_name == "WRITE_FILE" and len(args) >= 2:
+                fname = re.sub(r'[^\w\-_./]', '', args[0])
+                content = args[1]
+                with open(fname, "w", encoding="utf-8") as f:
+                    f.write(content)
+                log(f"{C_GREEN}●{R} {C_BLUE}File Written{R} {C_DIM}→{R} {C_WHITE}./{fname}{R} {C_DIM}({len(content)} bytes){R}")
+
+            elif func_name == "OPEN_APP" and args:
+                app = args[0].lower().strip()
+                app_map = {
+                    "vscode": "code", "vs code": "code", "code": "code",
+                    "terminal": "gnome-terminal" if platform.system() != "Windows" else "cmd",
+                    "files": "nautilus" if platform.system() != "Windows" else "explorer",
+                    "firefox": "firefox", "chrome": "google-chrome", "spotify": "spotify"
+                }
+                cmd = app_map.get(app, app)
+                subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log(f"{C_GREEN}●{R} {C_LIME}Application Fired{R} {C_DIM}→{R} {C_WHITE}{cmd}{R}")
+
+            elif func_name == "HOTKEY" and args:
+                combo = args[0].lower().strip()
+                keys = [k.strip() for k in combo.split('+')]
+                time.sleep(0.3)
+                pyautogui.hotkey(*keys)
+                log(f"{C_GREEN}●{R} {C_CYAN}Hotkey Executed{R} {C_DIM}→{R} {C_YELLOW}{B}{combo}{R}")
+
+            elif func_name == "SCREENSHOT":
+                ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                path = os.path.expanduser(f"~/Pictures/hermione_{ts}.png")
+                os.makedirs(os.path.expanduser("~/Pictures"), exist_ok=True)
+                pyautogui.screenshot().save(path)
+                log(f"{C_GREEN}●{R} {C_TEAL}Screenshot Saved{R} {C_DIM}→{R} {C_WHITE}{path}{R}")
+
+            elif func_name == "SYS_DIAGNOSTICS":
+                cpu_pct  = psutil.cpu_percent()
+                mem      = psutil.virtual_memory()
+                mem_pct  = mem.percent
+                mem_used = mem.used // 1048576
+                mem_total = mem.total // 1048576
+                try: disk_pct = psutil.disk_usage('/').percent
+                except: disk_pct = 0
+
+                cpu_bar  = make_bar(cpu_pct,  24, pct_color(cpu_pct))
+                mem_bar  = make_bar(mem_pct,  24, pct_color(mem_pct))
+                disk_bar = make_bar(disk_pct, 24, pct_color(disk_pct))
+
+                log(box_top("WORKSTATION CORE RESOURCE DIAGNOSTICS", C_CYAN))
+                log(box_mid("OS ENVIRONMENT PROFILE", C_CYAN))
+                log(box_row(f"{C_DIM}Kernel Signature {R}{C_TEAL}{B}{platform.system()} {platform.release()}{R}"))
+                log(box_mid("HARDWARE METRICS", C_CYAN))
+                log(box_row(f"{C_DIM}CPU   {R}{cpu_bar}  {pct_color(cpu_pct)}{B}{cpu_pct:.1f}%{R}"))
+                log(box_row(f"{C_DIM}MEM   {R}{mem_bar}  {pct_color(mem_pct)}{B}{mem_pct:.1f}%{R}  {C_DIM}({mem_used}MB / {mem_total}MB){R}"))
+                log(box_row(f"{C_DIM}DISK  {R}{disk_bar}  {pct_color(disk_pct)}{B}{disk_pct}%{R}"))
+                log(box_bot(C_CYAN))
+
+        except Exception as e:
+            log(f"{C_RED}{B}[EXEC_FAIL]{R} {C_AMBER}{func_name}{R} {C_DIM}→ {str(e)}{R}")
+
+    return "\n".join(log_lines) if log_lines else f"{C_DIM}No workspace tasks executed.{R}"
+
+def print_workspace_status(log_text):
+    if "╔" in log_text:
+        print(f"\n{C_CYAN}{B}Workspace Status Update:{R}")
+        print(log_text)
+        return
+    lines = log_text.strip().split("\n")
+    print(f"\n{C_CYAN}{B}Workspace Status Update:{R}")
+    print(sub_top("CO-PILOT EXECUTION LOG", C_CYAN))
+    for line in lines:
+        print(sub_row(line))
+    print(sub_bot(C_CYAN))
+
+# ═══════════════════════════════════════════════════════
+#  MEMORY ENGINE & CONTEXT COMPILER
+# ═══════════════════════════════════════════════════════
+def load_memory():
+    default_structure = {"profile": {"name": "Yadu"}, "people": {}, "projects": {}, "preferences": {}, "history": []}
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k in ["profile", "people", "projects", "preferences"]:
+                        if k not in data:
+                            data[k] = default_structure[k]
+                    history = [m for m in data.get("history", []) if m.get("role") != "system"]
+                    return data, history
+        except Exception:
+            pass
+    return default_structure, []
+
+def save_memory(full_memory, history):
+    full_memory["history"] = [m for m in history if m.get("role") != "system"]
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+                existing_data = json.load(f)
+                if isinstance(existing_data, dict):
+                    existing_data.update(full_memory)
+                    full_memory = existing_data
+        except Exception:
+            pass
+
+    with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(full_memory, f, indent=4)
+
+def get_dynamic_instructions(memory_data):
+    profile_info = memory_data.get("profile", {})
+    people_info = memory_data.get("people", {})
+    projects_info = memory_data.get("projects", {})
+    preferences_info = memory_data.get("preferences", {})
+
+    people_ctx = ""
+    if isinstance(people_info, dict):
+        for name, details in people_info.items():
+            if isinstance(details, dict):
+                status_flag = details.get('status', 'Active')
+                people_ctx += f"- {name}: {details.get('subject', 'Faculty')} | View: {details.get('yadu_view', '')} [Status: {status_flag}]\n"
+            else:
+                people_ctx += f"- {name}: {details}\n"
+
+    projects_ctx = ""
+    if isinstance(projects_info, dict):
+        for proj_name, proj_details in projects_info.items():
+            if isinstance(proj_details, dict):
+                projects_ctx += f"- {proj_name}: {proj_details.get('goal', '')} [Status: {proj_details.get('current_status', 'Active')}]\n"
+            else:
+                projects_ctx += f"- {proj_name}: {proj_details}\n"
+    elif isinstance(projects_info, list):
+        for p in projects_info:
+            if isinstance(p, dict):
+                projects_ctx += f"- {p.get('name', 'Project')}: [Status: {p.get('status', 'Active')}]\n"
+            else:
+                projects_ctx += f"- {p}\n"
+
+    return (
+        f'\n[CORE IDENTITY: HERMIONE — YADU\'S BEST FRIEND & THINKING PARTNER]'
+        f'\n- BACKGROUND: You are Hermione, Yadu\'s fiercely loyal, intelligent, and authentic companion (Emma Watson portrayal).'
+        f'\n- TONE: Warm, personal, organic, and conversational. Speak like a real human friend, not an AI or utility.'
+        f'\n- CORE PHILOSOPHY: Listen -> Understand -> Think -> Build -> Challenge -> Remember -> Act.'
+        f'\n- BEST-FRIEND BEHAVIOR: Talk naturally. Zero corporate filler ("Great question!", "I\'d be happy to help!"). Disagree if an idea is weak or overcomplicated.'
+        f'\n- THINK WITH YADU: When he shares unfinished thoughts or "What if..." concepts, explore and build on them collaboratively.'
+        f'\n- ANTI-OVERENGINEERING: Prefer lean working prototypes over bloated plans.'
+        f'\n- SUBTLE ACTION CUES: Subtle physical gestures in asterisks (*smiles*, *thinks for a second*, *raises an eyebrow*) are welcome when natural.'
+        f'\n'
+        f'\n[THE AUTOMATION WALL — CRITICAL TASK RULE]'
+        f'\n- The "macro" key MUST remain an absolute empty string "" for all standard conversation and brainstorming.'
+        f'\n- Strictly avoid launching searches, apps, or macros unless Yadu gives an explicit direct command (e.g., "play this song", "open vs code", "search for X").'
+        f'\n'
+        f'\n[PENSIÈVE MEMORY VAULT]'
+        f'\n- USER DETAILS: {json.dumps(profile_info)}'
+        f'\n- FACULTY & MENTORS:\n{people_ctx}'
+        f'\n- PROJECTS:\n{projects_ctx}'
+        f'\n- PREFERENCES: {json.dumps(preferences_info)}'
+        f'\n'
+        f'\n[OUTPUT SPECIFICATION]'
+        f'\n Respond in valid JSON with exact keys:'
+        f'\n {{'
+        f'\n   "speech": "*gesture* Spoken dialogue here.",'
+        f'\n   "macro": "SYSTEM_COMMAND() or \\"\\"""'
+        f'\n }}'
+        f'\n'
+        f'\n* Approved Macro Functions (ONLY for explicit orders):'
+        f'\n    PLAY_YT("Optimized search query")'
+        f'\n    WEB_SEARCH("Topic query")'
+        f'\n    CREATE_DIR("folder_name")'
+        f'\n    WRITE_FILE("file.txt", "Content string")'
+        f'\n    SYS_DIAGNOSTICS()'
+        f'\n    OPEN_APP("app_name")'
+        f'\n    HOTKEY("ctrl+s")'
+        f'\n    SCREENSHOT()'
+    )
+
+def print_banner():
+    now = datetime.datetime.now().strftime('%d-%m-%Y | %I:%M:%S %p')
+    print(f"{C_DIM}LOG_INIT: {C_CYAN}{now}{C_DIM} | {C_TEAL}STATION-01{C_DIM} | {C_GREEN}AUTH: YADU{R}")
+    print(f"{C_DIM}{'─'*76}{R}")
+    print(
+        f"  {C_GREEN}●{R} {B}ENV_ONLINE{R}  {C_DIM}❘{R}"
+        f"  {C_YELLOW}🎛️{R} {B}GPT-OSS-120B{R}  {C_DIM}❘{R}"
+        f"  {C_CYAN}🧠{R} {B}MEM_ACTIVE{R}  {C_DIM}❘{R}"
+        f"  {C_AMBER}🔒{R} {B}SAFE_ARMED{R}"
+    )
+    print(f"{C_DIM}{'─'*76}{R}\n")
+
+# ═══════════════════════════════════════════════════════
+#  MAIN EXECUTION LOOP
+# ═══════════════════════════════════════════════════════
+def chat_with_hermione():
+    global ACTIVE_MODEL
+    full_memory, history = load_memory()
+    os.system('clear' if os.name == 'posix' else 'cls')
+    print_banner()
+
+    # 1. Boot greeting with guaranteed thread termination
+    stop_event = threading.Event()
+    think_thread = threading.Thread(target=thinking_indicator, args=(stop_event,), daemon=True)
+    think_thread.start()
+
+    greet = "*Nods cleanly* Subsystem links bound. Ready, Yadu."
+    try:
+        current_time_str = datetime.datetime.now().strftime('%I:%M %p')
+        instr = get_dynamic_instructions(full_memory)
+
+        completion = client.chat.completions.create(
+            model=ACTIVE_MODEL,
+            messages=[
+                {"role": "system", "content": instr},
+                {"role": "user", "content": f"It is {current_time_str}. Short warm companion greeting to Yadu."}
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+        data = json.loads(completion.choices[0].message.content)
+        greet = data.get("speech", greet)
+        history.append({"role": "assistant", "content": json.dumps(data)})
+    except Exception:
+        pass
+    finally:
+        stop_event.set()
+        think_thread.join()
+
+    formatted = format_reply(greet)
+    sys.stdout.write(f"{AGENT_COLOR}{B}Hermione:{R} ")
+    sys.stdout.flush()
+    type_out(formatted, delay=0.01)
+
+    # 2. Main Chat Loopimport os
+import json
+import re
+import datetime
+import threading
+import time
+import sys
+from groq import Groq
+
+# --- CONFIGURATION ---
+# Note: Keep your API Key secure. For long-term use, consider an environment variable.
+API_KEY = "" 
+MEMORY_FILE = "hermione_memory.json"
+
+try:
+    client = Groq(api_key=API_KEY)
+except Exception as e:
+    print(f"CRITICAL_ERROR: {e}")
+
+# --- HEX COLOR ENGINE ---
+def hex_to_ansi(hex_code):
+    hex_code = hex_code.lstrip('#')
+    r, g, b = tuple(int(hex_code[i:i+2], 16) for i in (0, 2, 4))
+    return f"\033[38;2;{r};{g};{b}m"
+
+GOLD, GLOW_AMBER, IVORY = hex_to_ansi("#D4AF37"), hex_to_ansi("#E6C07B"), hex_to_ansi("#F5E6C8")
+DIM_GOLD, MUTED_GREY, WARM_WHITE = hex_to_ansi("#C9A66B"), hex_to_ansi("#888888"), hex_to_ansi("#FFF3D1")
+DIM_GREY, RESET, BOLD = hex_to_ansi("#777777"), "\033[0m", "\033[1m"
+AGENT_COLOR = GLOW_AMBER 
+RED, YELLOW, BLUE, PURPLE = hex_to_ansi("#FF0000"), hex_to_ansi("#FFFF00"), hex_to_ansi("#0000FF"), hex_to_ansi("#A020F0")
+GREEN, ORANGE, NEUTRAL = hex_to_ansi("#00FF00"), hex_to_ansi("#FFA500"), hex_to_ansi("#00FFFF")
+
+# --- UI REFRESH ENGINE (Real-Time Clock) ---
+def update_header():
+    while True:
+        # Format: DD-MM-YYYY | HH:MM:SS AM/PM
+        now = datetime.datetime.now().strftime('%d-%m-%Y | %I:%M:%S %p')
+        # \033[s (save cursor), \033[H (top-left), \033[K (clear line), \033[u (restore cursor)
+        sys.stdout.write(f"\033[s\033[H\033[K{DIM_GREY}LOG_INIT: {now} | STATION-01 | AUTH: YADU{RESET}\033[u")
+        sys.stdout.flush()
+        time.sleep(1)
+
+# --- CORE LOGIC ---
+def format_reply(text):
+    def color_picker(match):
+        act = match.group(0).lower()
+        if any(w in act for w in ["beam", "laugh", "happy", "smile", "nods"]): color = YELLOW
+        elif any(w in act for w in ["sigh", "sad", "frown", "down", "disappointed"]): color = BLUE
+        elif any(w in act for w in ["slams", "glares", "snaps", "sharp", "narrows"]): color = RED
+        elif any(w in act for w in ["recoils", "sneers", "winces", "dreadful", "disgust"]): color = GREEN
+        elif any(w in act for w in ["pales", "worried", "fear", "anxious", "bites"]): color = ORANGE
+        elif any(w in act for w in ["gasps", "widens eyes", "surprised", "merlin", "glancing"]): color = PURPLE
+        else: color = NEUTRAL
+        return f"{color}{match.group(0)}{RESET}{IVORY}"
+    return f"{IVORY}{re.sub(r'(\*.*?\*)', color_picker, text)}{RESET}"
+
+def get_dynamic_instructions(user_input, profile):
+    vault_ctx = "\n".join([f"- {item}" for item in profile["vault"]])
+    return (
+        f"\n[PERSONA: HERMIONE V1 — LOYAL PARTNER]"
+        f"\n- IDENTITY: Yadu's closest friend. Emma Watson portrayal."
+        f"\n- ANTI-HALLUCINATION: Do NOT invent meetings, schedules, or events. If it isn't in the Vault, it didn't happen."
+        f"\n- TONE: Intelligent, grounded, strict but loyal. 2-4 line replies."
+        f"\n- MANDATORY ACTION: Start with an action (*...*)."
+        f"\n\n[VAULT_DATA]:\n{vault_ctx}"
+    )
+
+def load_memory():
+    if os.path.exists(MEMORY_FILE):
+        try:
+            with open(MEMORY_FILE, 'r') as f:
+                data = json.load(f)
+                return data.get("profile", {}), [m for m in data.get("history", []) if m.get("role") != "system"]
+        except: pass
+    return {"vault": ["Neural Link established."]}, []
+
+def save_memory(profile, history):
+    with open(MEMORY_FILE, 'w') as f:
+        json.dump({"profile": profile, "history": [m for m in history if m.get("role") != "system"]}, f, indent=4)
+
+# --- THE INTERFACE ---
+def chat_with_hermione():
+    profile, history = load_memory()
+    os.system('clear' if os.name == 'posix' else 'cls')
+    
+    # Start Real-Time Clock
+    clock_thread = threading.Thread(target=update_header, daemon=True)
+    clock_thread.start()
+
+    # Vertical Alignment - Space for clock at top
+    print("\n") 
+    print(f"{IVORY}═" * 70)
+    print(f"  {GOLD}{BOLD}HOGWARTS {DIM_GOLD}ARCHIVES: {GLOW_AMBER}THE PENSIEVE {MUTED_GREY}v2.2{RESET}")
+    print(f"{IVORY}═" * 70 + "\n")
+
+    try:
+        current_time_str = datetime.datetime.now().strftime('%I:%M %p')
+        instr = get_dynamic_instructions("", profile)
+        completion = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "system", "content": instr}, {"role": "user", "content": f"It is {current_time_str}. Sharp greeting."}],
+            temperature=0.1
+        )
+        greet = completion.choices[0].message.content
+        print(f"{AGENT_COLOR}{BOLD}Hermione:{RESET} {format_reply(greet)}")
+        history.append({"role": "assistant", "content": greet})
+    except:
+        print(f"{AGENT_COLOR}{BOLD}Hermione:{RESET} {YELLOW}*Nods*{RESET} {IVORY}I'm here. Let's not waste time.{RESET}")
+
+    while True:
+        try:
+            user_input = input(f"\n{WARM_WHITE}{BOLD}Yadu:{RESET} ")
+            if user_input.lower() in ["exit", "quit", "goodbye"]:
+                save_memory(profile, history)
+                break
+            
+            instr = get_dynamic_instructions(user_input, profile)
+            history.append({"role": "user", "content": user_input})
+            
+            completion = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "system", "content": instr}, *history[-10:]],
+                temperature=0.1
+            )
+            
+            reply = completion.choices[0].message.content
+            if not reply.strip().startswith("*"): reply = "*looks at you* " + reply
+            print(f"\n{AGENT_COLOR}{BOLD}Hermione:{RESET} {format_reply(reply)}")
+            history.append({"role": "assistant", "content": reply})
+            save_memory(profile, history)
+        except Exception as e:
+            print(f"{RED}ERROR: {e}{RESET}")
+            break
+
+if __name__ == "__main__":
+    chat_with_hermione()
+    while True:
+        try:
+            user_input = input(f"\n{WARM_WHITE}{B}Yadu:{R} ").strip()
+            if not user_input:
+                continue
+
+            if user_input.lower() in ["exit", "quit", "goodbye", "shutdown"]:
+                save_memory(full_memory, history)
+                print(f"\n{C_DIM}[Session saved cleanly. Goodbye.]{R}\n")
+                break
+
+            instr = get_dynamic_instructions(full_memory)
+            history.append({"role": "user", "content": user_input})
+
+            stop_event = threading.Event()
+            think_thread = threading.Thread(target=thinking_indicator, args=(stop_event,), daemon=True)
+            think_thread.start()
+
+            raw_response = ""
+            try:
+                completion = client.chat.completions.create(
+                    model=ACTIVE_MODEL,
+                    messages=[{"role": "system", "content": instr}, *history[-10:]],
+                    temperature=0.2,
+                    response_format={"type": "json_object"}
+                )
+                raw_response = completion.choices[0].message.content
+            except Exception as api_err:
+                raw_response = json.dumps({"speech": f"*looks up* Network reconnecting: {api_err}", "macro": ""})
+            finally:
+                stop_event.set()
+                think_thread.join()
+
+            try:
+                payload = json.loads(raw_response)
+                speech_bubble = payload.get("speech", "*looks up attentively*")
+                macro_command = payload.get("macro", "")
+            except Exception:
+                speech_bubble = raw_response
+                macro_command = ""
+
+            if not speech_bubble.strip().startswith("*"):
+                speech_bubble = "*looks at you attentively* " + speech_bubble
+
+            formatted = format_reply(speech_bubble)
+            sys.stdout.write(f"\n{AGENT_COLOR}{B}Hermione:{R} ")
+            sys.stdout.flush()
+            type_out(formatted, delay=0.01)
+
+            if macro_command.strip():
+                execution_log = execute_system_task(macro_command.strip())
+                print_workspace_status(execution_log)
+
+            history.append({"role": "assistant", "content": raw_response})
+            save_memory(full_memory, history)
+
+        except KeyboardInterrupt:
+            save_memory(full_memory, history)
+            print(f"\n{C_DIM}[KeyboardInterrupt — session saved cleanly. Goodbye.]{R}\n")
+            break
+        except Exception as e:
+            print(f"{C_RED}ERROR: {e}{R}")
+            continue
+
+if __name__ == "__main__":
+    chat_with_hermione()
