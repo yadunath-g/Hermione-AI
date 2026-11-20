@@ -1,14 +1,4 @@
-#!/usr/bin/env python3
-"""Hermione - a terminal companion with a small, safe set of system actions.
 
-Design:
-  * The model never touches the system. It returns JSON:
-        {"speech": "*smiles* On it.", "actions": [{"name": "OPEN_APP", "args": ["vscode"]}]}
-  * Every action is validated against a registry; file access is sandboxed to
-    ./hermione_workspace; apps come from an allowlist; writes ask for confirmation.
-  * /agent <task> runs a bounded loop: action results are fed back to the model
-    until it says it is done (or MAX_STEPS is reached).
-"""
 import datetime
 import json
 import os
@@ -31,19 +21,16 @@ try:
 except ImportError:
     psutil = None
 
-# --------------------------------------------------------------------------- #
-# Config
-# --------------------------------------------------------------------------- #
 MEMORY_FILE = Path("hermione_memory.json")
 WORKSPACE = Path("hermione_workspace").resolve()
 MODEL = os.environ.get("HERMIONE_MODEL", "openai/gpt-oss-120b")
 TEMPERATURE = 0.4
-CONTEXT_MESSAGES = 10      # messages sent to the model each turn
-HISTORY_LIMIT = 40         # messages kept on disk
-MAX_ACTIONS = 5            # per reply
+CONTEXT_MESSAGES = 10
+HISTORY_LIMIT = 40
+MAX_ACTIONS = 5
 MAX_FILE_BYTES = 100_000
-MAX_STEPS = 6              # agent loop limit
-READ_LIMIT = 20_000        # max characters READ_FILE returns
+MAX_STEPS = 6
+READ_LIMIT = 20_000
 
 def load_api_key():
     key = os.environ.get("GROQ_API_KEY")
@@ -67,9 +54,6 @@ try:
 except ImportError:
     sys.exit("Missing dependency. Run: pip install groq")
 
-# --------------------------------------------------------------------------- #
-# Terminal styling
-# --------------------------------------------------------------------------- #
 RESET, BOLD, DIM = "\033[0m", "\033[1m", "\033[2m"
 
 
@@ -105,7 +89,6 @@ def emotion_color(action_text):
 
 
 def format_reply(text):
-    """Style *gestures* by emotion and **bold** text; drop stray ANSI/code blocks."""
     text = re.sub(r"(?:\\033|\\u001b|\x1b)\[[0-9;]*m", "", text)
     text = re.sub(r"```[\s\S]*?```", "", text).strip()
     text = re.sub(r"\*\*(.+?)\*\*", lambda m: f"{BOLD}{m.group(1)}{RESET}{IVORY}", text)
@@ -141,7 +124,6 @@ def flush_input():
 
 
 class Spinner:
-    """Context manager showing a 'thinking' spinner in a background thread."""
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __enter__(self):
@@ -166,11 +148,7 @@ class Spinner:
         flush_input()
 
 
-# --------------------------------------------------------------------------- #
-# Actions (the only things the model can trigger)
-# --------------------------------------------------------------------------- #
 def safe_path(relative):
-    """Resolve a path inside the workspace; reject anything that escapes it."""
     WORKSPACE.mkdir(exist_ok=True)
     path = (WORKSPACE / str(relative)).resolve()
     if path != WORKSPACE and WORKSPACE not in path.parents:
@@ -268,7 +246,6 @@ def act_sys_diagnostics():
     ])
 
 
-# name -> (function, number of string args, needs confirmation)
 ACTIONS = {
     "PLAY_YT": (act_play_yt, 1, False),
     "WEB_SEARCH": (act_web_search, 1, False),
@@ -289,7 +266,6 @@ def confirm(prompt):
 
 
 def execute_actions(actions):
-    """Validate and run model-requested actions; return a list of (ok, text)."""
     if not isinstance(actions, list):
         return []
     results = []
@@ -314,7 +290,6 @@ def execute_actions(actions):
 
 
 def show_results(results):
-    """Print action results for the user (long output is shortened on screen only)."""
     if not results:
         return
     print(f"\n{CYAN}{BOLD}Actions:{RESET}")
@@ -325,9 +300,6 @@ def show_results(results):
         print(f"  {mark} " + text.replace("\n", "\n    "))
 
 
-# --------------------------------------------------------------------------- #
-# Memory
-# --------------------------------------------------------------------------- #
 def default_memory():
     return {"profile": {"name": "Yadu"}, "people": {}, "projects": {},
             "preferences": {}, "notes": [], "history": []}
@@ -358,7 +330,7 @@ def save_memory(memory, history):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(memory, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, MEMORY_FILE)  # atomic: no half-written memory on a crash
+        os.replace(tmp, MEMORY_FILE)
     except Exception:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -366,16 +338,12 @@ def save_memory(memory, history):
 
 
 def context_window(history):
-    """Last N messages, trimmed so the slice starts on a user message."""
     window = history[-CONTEXT_MESSAGES:]
     while window and window[0]["role"] != "user":
         window = window[1:]
     return window
 
 
-# --------------------------------------------------------------------------- #
-# Prompt + model
-# --------------------------------------------------------------------------- #
 def describe(mapping):
     if not isinstance(mapping, dict) or not mapping:
         return "(none)"
@@ -455,9 +423,6 @@ def ask_model(system_prompt, messages):
     return speech, actions, raw, done
 
 
-# --------------------------------------------------------------------------- #
-# UI
-# --------------------------------------------------------------------------- #
 HELP = """Commands:
   /remember <text>   save a note Hermione will always see
   /notes             list saved notes
@@ -476,7 +441,6 @@ def say(speech):
 
 
 def short_name(memory):
-    """First word of the profile name, e.g. 'Yadu (Yadunath G)' -> 'Yadu'."""
     parts = str(memory["profile"].get("name", "")).split()
     return parts[0] if parts else "You"
 
@@ -489,7 +453,6 @@ def banner():
 
 
 def handle_command(text, memory, history):
-    """Return True if the input was a slash command."""
     cmd, _, rest = text.partition(" ")
     cmd = cmd.lower()
     if cmd == "/help":
@@ -516,7 +479,6 @@ def handle_command(text, memory, history):
 
 
 def run_agent(task, memory, history):
-    """Bounded loop: act, feed the results back to the model, repeat until done."""
     msgs = [{"role": "user", "content": task}]
     last_speech, last_failed_plan, finished = "*pauses* I could not finish that task.", None, False
     try:
@@ -534,7 +496,6 @@ def run_agent(task, memory, history):
             results = execute_actions(actions)
             show_results(results)
 
-            # The same plan failing twice in a row means the model is stuck.
             plan = json.dumps(actions, sort_keys=True)
             all_failed = bool(results) and not any(ok for ok, _ in results)
             if all_failed and plan == last_failed_plan:
@@ -553,7 +514,6 @@ def run_agent(task, memory, history):
     except Exception as e:
         print(f"\n{RED}[Agent error]{RESET} {DIM}{e}{RESET}")
 
-    # Keep chat history tidy: the task and the final words only, never old actions.
     history.append({"role": "user", "content": f"/agent {task}"})
     history.append({"role": "assistant",
                     "content": json.dumps({"speech": last_speech, "actions": []}, ensure_ascii=False)})
@@ -564,7 +524,6 @@ def main():
     os.system("clear")
     banner()
 
-    # Greeting (not stored in history, so history always starts on a user turn)
     greeting = "*smiles* Ready when you are."
     try:
         with Spinner():
@@ -605,7 +564,7 @@ def main():
             with Spinner():
                 speech, actions, raw, _ = ask_model(build_system_prompt(memory), context_window(history))
         except Exception as e:
-            history.pop()  # don't leave a dangling user turn
+            history.pop()
             print(f"\n{RED}[Network/API error]{RESET} {DIM}{e}{RESET}")
             continue
 
