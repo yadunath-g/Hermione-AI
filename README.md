@@ -4,7 +4,11 @@ A lightweight command-line AI assistant built in Python, powered by `openai/gpt-
 
 ## Demo
 
-[https://github.com/user-attachments/assets/83be23a7-e984-4d68-b655-7afb0693d75c](https://github.com/user-attachments/assets/83be23a7-e984-4d68-b655-7afb0693d75c)
+
+
+https://github.com/user-attachments/assets/35b4ad4a-09a4-493e-b571-a4f40d7729cf
+
+
 
 ## Motivation
 
