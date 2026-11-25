@@ -1,4 +1,3 @@
-
 import datetime
 import json
 import os
@@ -31,6 +30,7 @@ MAX_ACTIONS = 5
 MAX_FILE_BYTES = 100_000
 MAX_STEPS = 6
 READ_LIMIT = 20_000
+
 
 def load_api_key():
     key = os.environ.get("GROQ_API_KEY")
@@ -446,10 +446,14 @@ def short_name(memory):
 
 
 def banner():
-    now = datetime.datetime.now().strftime("%d-%m-%Y | %I:%M %p")
-    print(f"{DIM}{now} | model: {MODEL} | workspace: {WORKSPACE}{RESET}")
-    print(f"{DIM}{'─' * 72}{RESET}")
-    print(f"{DIM}Type /help for commands.{RESET}")
+    now = datetime.datetime.now().strftime("%d-%m-%Y  %I:%M %p")
+    cols = shutil.get_terminal_size((76, 24)).columns
+    violet, slate = rgb("#A78BFA"), rgb("#92A4BC")
+    title = f"{violet}{BOLD}Hermione{RESET}  {DIM}•  {now}  •  {slate}{MODEL}{DIM}  •  ./{WORKSPACE.name}{RESET}"
+    width = min(len(strip_ansi(title)), cols)
+    print(title)
+    print(f"{slate}{'─' * width}{RESET}")
+    print(f"{DIM}Type /help for commands or /agent <task> for autonomous steps.{RESET}")
 
 
 def handle_command(text, memory, history):
